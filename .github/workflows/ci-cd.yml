@@ -1,0 +1,230 @@
+# ==============================================================
+#  CI / CD Pipeline — CI/CD Demo FastAPI Application
+#
+#  Pipeline stages (run in order):
+#    1. quality-gate  → format + lint + type-check + security
+#    2. test          → pytest with 80% coverage gate
+#    3. docker-build  → build image and push to Docker Hub
+#                       (only on push to main, not on PRs)
+# ==============================================================
+
+name: CI/CD Pipeline
+
+# ── TRIGGERS ───────────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:                          # Only run if relevant files changed
+      - "app/**"
+      - "tests/**"
+      - "main.py"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "Dockerfile"
+      - ".github/workflows/**"
+
+  pull_request:
+    branches:
+      - main                        # Validate every PR before merging
+    types: [opened, synchronize, reopened]
+
+  workflow_dispatch:                # Allow manual trigger from GitHub UI
+    inputs:
+      push_image:
+        description: "Push Docker image to Docker Hub?"
+        type: boolean
+        default: true
+
+# Cancel any in-progress run for the same branch/PR when a new commit arrives
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── GLOBAL ENV VARS (non-sensitive) ────────────────────────────
+env:
+  PYTHON_VERSION: "3.11"
+  REGISTRY: docker.io
+  # IMAGE_NAME is set to <dockerhub-username>/<repo-name>
+  # The username comes from the secret; repo name from github context.
+  IMAGE_REPO: ${{ secrets.DOCKER_HUB_USERNAME }}/cicd-demo
+
+# ==============================================================
+# JOB 1 — Quality Gate
+# Runs: Black → isort → Flake8 → mypy → Bandit → pip-audit
+# ==============================================================
+jobs:
+  quality-gate:
+    name: "🔍 Quality Gate"
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Get the source code ──────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python with pip cache ────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"                  # Cache ~/.cache/pip between runs
+
+      # ── 3. Install ALL dependencies (runtime + dev tools) ──
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 4. Black — code formatting check ───────────────────
+      # --check means "fail if any file would be reformatted"
+      - name: "Black — format check"
+        run: black --check --diff app/ tests/ main.py
+
+      # ── 5. isort — import order check ──────────────────────
+      - name: "isort — import order check"
+        run: isort --check-only --diff app/ tests/ main.py
+
+      # ── 6. Flake8 — style linting ──────────────────────────
+      - name: "Flake8 — lint"
+        run: flake8 app/ tests/
+
+      # ── 7. mypy — static type checking ─────────────────────
+      - name: "mypy — type check"
+        run: mypy app/
+
+      # ── 8. Bandit — Python security scan ───────────────────
+      - name: "Bandit — security scan"
+        run: bandit -r app/ -c .bandit
+
+      # ── 9. pip-audit — dependency vulnerability scan ───────
+      - name: "pip-audit — dependency CVE check"
+        run: pip-audit -r requirements.txt
+
+  # ==============================================================
+  # JOB 2 — Tests
+  # Runs pytest with 80% coverage enforcement.
+  # Depends on quality-gate passing first.
+  # ==============================================================
+  test:
+    name: "🧪 Tests & Coverage"
+    runs-on: ubuntu-latest
+    needs: quality-gate              # Only run after quality checks pass
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Run tests and generate coverage report
+      # --cov-fail-under=80 is enforced via pyproject.toml [tool.coverage.report]
+      - name: "pytest — run test suite"
+        run: |
+          pytest tests/ \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            -v
+
+      # Upload coverage XML as a build artifact so you can
+      # download & inspect it from the GitHub Actions UI
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()                 # Upload even if tests fail
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  # ==============================================================
+  # JOB 3 — Docker Build & Push
+  # Builds a multi-stage Docker image and pushes to Docker Hub.
+  # Only pushes on:  push to main   OR   manual trigger
+  # On PRs          → build only (no push), used as a smoke test
+  # ==============================================================
+  docker-build:
+    name: "🐳 Docker Build & Push"
+    runs-on: ubuntu-latest
+    needs: [quality-gate, test]      # Both previous jobs must pass
+
+    permissions:
+      contents: read
+      packages: write                # Needed if you ever switch to GHCR
+
+    steps:
+      # ── 1. Checkout code ────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Docker Buildx ─────────────────────────────
+      # Buildx enables: multi-platform builds, BuildKit cache,
+      # and the gha (GitHub Actions) remote cache backend.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── 3. Login to Docker Hub ──────────────────────────────
+      # Reads DOCKER_HUB_USERNAME and DOCKER_HUB_TOKEN from
+      # GitHub → Repo Settings → Secrets and variables → Actions
+      # This step is SKIPPED on pull_request events (no push needed).
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      # ── 4. Generate image tags from git metadata ─────────────
+      # This action reads git context and produces smart tags:
+      #   main branch push  → :latest  + :main  + :sha-<short>
+      #   PR                → :pr-42
+      #   version tag v1.2  → :1.2  + :latest
+      - name: Extract Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_REPO }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # ── 5. Build (and optionally push) the Docker image ─────
+      # cache-from/cache-to use the GHA remote cache so repeated
+      # runs only rebuild layers that actually changed.
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          # Push only on main branch push or manual trigger; NOT on PRs
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache — dramatically speeds up subsequent builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 6. Print the image digest for full traceability ─────
+      - name: Print image digest
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "✅ Image pushed successfully!"
+          echo "📦 Image: ${{ env.IMAGE_REPO }}"
+          echo "🔖 Tags:  ${{ steps.meta.outputs.tags }}"
+          echo "🔑 Digest: ${{ steps.build.outputs.digest }}"

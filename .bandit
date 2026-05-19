@@ -1,0 +1,8 @@
+exclude_dirs:
+  - .venv
+  - venv
+  - tests
+  - build
+  - dist
+skips:
+  - B101
