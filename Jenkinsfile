@@ -8,43 +8,36 @@
 //    3. Docker Build  → build image and push to Docker Hub
 //                       (only on main branch, not other branches)
 //
-//  Prerequisites on Jenkins server:
-//    - Python 3.11 installed and on PATH
-//    - Docker installed and Jenkins user in docker group
+//  Prerequisites on Jenkins server / container:
+//    - Python 3 installed  (apt-get install -y python3 python3-pip python3-venv)
+//    - Docker installed and accessible
 //    - Jenkins Credentials:
-//        ID: DOCKER_HUB_USERNAME  (Secret Text)
-//        ID: DOCKER_HUB_TOKEN     (Secret Text)
+//        ID: DOCKER_HUB_USERNAME  (Secret Text — your Docker Hub username)
+//        ID: DOCKER_HUB_TOKEN     (Secret Text — your Docker Hub access token)
 // =============================================================
 
 pipeline {
 
-    // Run on any available agent (Jenkins server or any connected node)
+    // Run on any available Jenkins agent / node
     agent any
 
     // ── TRIGGERS ───────────────────────────────────────────────
     triggers {
-        // Poll SCM every 5 minutes for changes (fallback if webhooks aren't set up)
+        // Poll SCM every 5 minutes for new commits
         pollSCM('H/5 * * * *')
     }
 
     // ── GLOBAL OPTIONS ─────────────────────────────────────────
     options {
-        // Keep only the last 10 builds to save disk space
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        // Abort the build if it takes longer than 30 minutes
         timeout(time: 30, unit: 'MINUTES')
-        // Add timestamps to console output
         timestamps()
-        // Do not allow concurrent builds on the same branch
         disableConcurrentBuilds()
     }
 
     // ── GLOBAL ENVIRONMENT VARIABLES ───────────────────────────
     environment {
-        PYTHON_VERSION = '3.11'
-        VENV_DIR       = '.venv-jenkins'
-        IMAGE_REPO     = "${DOCKER_HUB_USR}/cicd-demo"
-        // Docker Hub credentials are injected via withCredentials below
+        VENV_DIR = '.venv-jenkins'
     }
 
     // ===========================================================
@@ -60,71 +53,72 @@ pipeline {
             }
         }
 
-        // ── Stage 1: Setup Python Virtual Environment ──────────
+        // ── Stage 1: Verify Python & Setup Virtual Environment ─
         stage('Setup Python') {
             steps {
-                echo "🐍 Setting up Python ${PYTHON_VERSION} virtual environment..."
+                echo '🐍 Verifying Python and setting up virtual environment...'
                 sh '''
+                    # Print Python version for diagnostics
+                    python3 --version
+                    pip3 --version
+
+                    # Create a fresh virtual environment
                     python3 -m venv ${VENV_DIR}
+
+                    # Activate and install all dependencies
                     . ${VENV_DIR}/bin/activate
-                    pip install --upgrade pip
-                    pip install -r requirements.txt
+                    pip install --upgrade pip --quiet
+                    pip install -r requirements.txt --quiet
+                    echo "✅ Dependencies installed successfully"
                 '''
             }
         }
 
         // ── Stage 2: Quality Gate ──────────────────────────────
-        // Mirrors GitHub Actions job: quality-gate
+        // Runs: Black → isort → Flake8 → mypy → Bandit → pip-audit
         stage('Quality Gate') {
             steps {
                 echo '🔍 Running quality checks...'
 
-                // Black — code formatting check
                 sh '''
                     . ${VENV_DIR}/bin/activate
-                    echo "--- Black: format check ---"
+                    echo "--- ✏️  Black: format check ---"
                     black --check --diff app/ tests/ main.py
                 '''
 
-                // isort — import order check
                 sh '''
                     . ${VENV_DIR}/bin/activate
-                    echo "--- isort: import order check ---"
+                    echo "--- 📦 isort: import order check ---"
                     isort --check-only --diff app/ tests/ main.py
                 '''
 
-                // Flake8 — style linting
                 sh '''
                     . ${VENV_DIR}/bin/activate
-                    echo "--- Flake8: lint ---"
+                    echo "--- 🔎 Flake8: lint ---"
                     flake8 app/ tests/
                 '''
 
-                // mypy — static type checking
                 sh '''
                     . ${VENV_DIR}/bin/activate
-                    echo "--- mypy: type check ---"
+                    echo "--- 🔬 mypy: type check ---"
                     mypy app/
                 '''
 
-                // Bandit — Python security scan
                 sh '''
                     . ${VENV_DIR}/bin/activate
-                    echo "--- Bandit: security scan ---"
+                    echo "--- 🔒 Bandit: security scan ---"
                     bandit -r app/ -c .bandit
                 '''
 
-                // pip-audit — dependency CVE check
                 sh '''
                     . ${VENV_DIR}/bin/activate
-                    echo "--- pip-audit: dependency CVE check ---"
+                    echo "--- 🛡️  pip-audit: dependency CVE check ---"
                     pip-audit -r requirements.txt
                 '''
             }
         }
 
         // ── Stage 3: Tests & Coverage ──────────────────────────
-        // Mirrors GitHub Actions job: test
         stage('Tests & Coverage') {
             steps {
                 echo '🧪 Running test suite with coverage...'
@@ -142,12 +136,12 @@ pipeline {
             }
             post {
                 always {
-                    // Publish JUnit test results (visible in Jenkins test trend graph)
-                    junit 'reports/junit.xml'
+                    // Show test results in Jenkins UI (pass/fail trend graph)
+                    junit allowEmptyResults: true, testResults: 'reports/junit.xml'
 
-                    // Publish HTML coverage report
+                    // Show HTML coverage report as a tab in Jenkins UI
                     publishHTML(target: [
-                        allowMissing         : false,
+                        allowMissing         : true,
                         alwaysLinkToLastBuild: true,
                         keepAll              : true,
                         reportDir            : 'reports/htmlcov',
@@ -155,46 +149,45 @@ pipeline {
                         reportName           : 'Coverage Report'
                     ])
 
-                    // Archive coverage XML as a build artifact
-                    archiveArtifacts artifacts: 'reports/coverage.xml', fingerprint: true
+                    // Save coverage XML as a downloadable build artifact
+                    archiveArtifacts allowEmptyArchive: true,
+                                     artifacts: 'reports/coverage.xml',
+                                     fingerprint: true
                 }
             }
         }
 
         // ── Stage 4: Docker Build & Push ───────────────────────
-        // Mirrors GitHub Actions job: docker-build
-        // Only pushes the image when building the 'main' branch
+        // Builds the image on every branch.
+        // Pushes to Docker Hub ONLY on the 'main' branch.
         stage('Docker Build & Push') {
             steps {
                 script {
                     def shortSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                     def imageTag = "sha-${shortSha}"
-                    def isMain   = env.BRANCH_NAME == 'main'
+                    def isMain   = (env.BRANCH_NAME == 'main')
 
                     withCredentials([
-                        string(credentialsId: 'DOCKER_HUB_USERNAME', variable: 'DOCKER_HUB_USR'),
-                        string(credentialsId: 'DOCKER_HUB_TOKEN',    variable: 'DOCKER_HUB_PWD')
+                        string(credentialsId: 'DOCKER_HUB_USERNAME', variable: 'DOCKER_USR'),
+                        string(credentialsId: 'DOCKER_HUB_TOKEN',    variable: 'DOCKER_PWD')
                     ]) {
-                        def imageRepo = "${DOCKER_HUB_USR}/cicd-demo"
+                        def imageRepo = "${DOCKER_USR}/cicd-demo"
 
                         echo "🐳 Building Docker image: ${imageRepo}:${imageTag}"
                         sh "docker build -t ${imageRepo}:${imageTag} ."
 
                         if (isMain) {
-                            echo "🚀 Pushing image to Docker Hub (main branch)..."
-                            sh "echo ${DOCKER_HUB_PWD} | docker login -u ${DOCKER_HUB_USR} --password-stdin"
+                            echo '🚀 Pushing image to Docker Hub (main branch)...'
+                            sh "echo \${DOCKER_PWD} | docker login -u \${DOCKER_USR} --password-stdin"
                             sh "docker push ${imageRepo}:${imageTag}"
-
-                            // Also tag and push as :latest on main
-                            sh "docker tag ${imageRepo}:${imageTag} ${imageRepo}:latest"
+                            sh "docker tag  ${imageRepo}:${imageTag} ${imageRepo}:latest"
                             sh "docker push ${imageRepo}:latest"
-
-                            echo "✅ Image pushed: ${imageRepo}:${imageTag} and ${imageRepo}:latest"
+                            echo "✅ Pushed: ${imageRepo}:${imageTag} and ${imageRepo}:latest"
                         } else {
-                            echo "ℹ️ Not on main branch — build only, no push."
+                            echo "ℹ️  Not on main branch — image built but NOT pushed."
                         }
 
-                        // Clean up local image to save disk space
+                        // Remove local image to save disk space
                         sh "docker rmi ${imageRepo}:${imageTag} || true"
                     }
                 }
@@ -202,11 +195,13 @@ pipeline {
         }
     }
 
-    // ── POST-BUILD NOTIFICATIONS ───────────────────────────────
+    // ── POST-BUILD ACTIONS ─────────────────────────────────────
     post {
         success {
             echo """
-            ✅ Pipeline SUCCESS
+            ╔══════════════════════════════╗
+            ║   ✅  Pipeline  SUCCESS      ║
+            ╚══════════════════════════════╝
             Branch  : ${env.BRANCH_NAME}
             Build # : ${env.BUILD_NUMBER}
             Commit  : ${env.GIT_COMMIT?.take(7)}
@@ -214,18 +209,20 @@ pipeline {
         }
         failure {
             echo """
-            ❌ Pipeline FAILED
+            ╔══════════════════════════════╗
+            ║   ❌  Pipeline  FAILED       ║
+            ╚══════════════════════════════╝
             Branch  : ${env.BRANCH_NAME}
             Build # : ${env.BUILD_NUMBER}
             Commit  : ${env.GIT_COMMIT?.take(7)}
-            Check the console output for details.
+            → Open Console Output to see which stage failed.
             """
         }
         unstable {
-            echo '⚠️ Pipeline UNSTABLE — some tests may have failed. Check test results.'
+            echo '⚠️  Pipeline UNSTABLE — some tests failed. Check Test Results tab.'
         }
         cleanup {
-            // Remove the virtual environment to keep the workspace clean
+            // Always remove the virtual environment to keep workspace tidy
             sh 'rm -rf ${VENV_DIR} || true'
         }
     }
