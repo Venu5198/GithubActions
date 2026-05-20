@@ -1,0 +1,7 @@
+# Runtime-only dependencies — installed in the production Docker image.
+# Dev tools (black, flake8, mypy, bandit, pip-audit, build, pytest)
+# are intentionally EXCLUDED to minimize the attack surface and image size.
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0.0

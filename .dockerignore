@@ -40,3 +40,18 @@ Thumbs.db
 .github/
 run_pipeline.sh
 *.md
+Jenkinsfile
+sonar-project.properties
+jenkins/
+
+# ── Test files (never go in production image) ─────────────────
+tests/
+reports/
+.coverage
+*.xml
+
+# ── Dev virtual environments ──────────────────────────────────
+.venv-jenkins/
+
+# ── Full dev requirements (only runtime deps go in image) ─────
+requirements.txt

@@ -1,24 +1,27 @@
 # =============================================================
 # Stage 1 — Builder
-# Install dependencies in an isolated layer.
-# This layer is DISCARDED in the final image; only the
-# installed packages (in /install) are copied across.
+# Installs ONLY the runtime packages (fastapi, uvicorn, pydantic).
+# Dev/test/quality tools (bandit, pip-audit, pytest, black, etc.)
+# are NOT installed here — they run only in CI, never in the image.
+# This layer is DISCARDED in the final image; only the installed
+# packages (in /install) are copied across.
 # =============================================================
 FROM python:3.11-slim AS builder
 
 WORKDIR /install
 
-# Copy only the dependency manifest first — this lets Docker
-# cache the pip-install layer until requirements.txt changes.
-COPY requirements.txt .
+# Copy only the runtime requirements — intentionally excludes dev tools
+# to keep the attack surface minimal and reduce Trivy CVE findings.
+COPY requirements-runtime.txt .
 
 RUN pip install --upgrade pip \
- && pip install --no-cache-dir --prefix=/install -r requirements.txt
+ && pip install --no-cache-dir --prefix=/install -r requirements-runtime.txt
 
 
 # =============================================================
 # Stage 2 — Runtime
-# Lean final image; no build tools, no cache, no .venv.
+# Lean final image: only app code + runtime packages.
+# No build tools, no dev tools, no cache, no .venv.
 # =============================================================
 FROM python:3.11-slim AS runtime
 
@@ -30,10 +33,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Copy installed packages from the builder stage
+# Copy installed runtime packages from the builder stage
 COPY --from=builder /install /usr/local
 
-# Copy application source
+# Copy application source only (no tests, no CI config)
 COPY app/ ./app/
 COPY main.py .
 
