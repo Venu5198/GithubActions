@@ -1,11 +1,12 @@
 # ==============================================================
 #  CI / CD Pipeline — CI/CD Demo FastAPI Application
 #
-#  Pipeline stages (run in order):
-#    1. quality-gate  → format + lint + type-check + security
+#  Jobs (run in dependency order):
+#    1. quality-gate  → Black, isort, Flake8, mypy, Bandit, pip-audit
 #    2. test          → pytest with 80% coverage gate
-#    3. docker-build  → build image and push to Docker Hub
-#                       (only on push to main, not on PRs)
+#    3. sonarcloud    → SonarCloud code quality & security analysis
+#    4. docker-build  → build image, Trivy scan, push to Docker Hub
+#                       (push only on main branch, not PRs)
 # ==============================================================
 
 name: CI/CD Pipeline
@@ -16,7 +17,7 @@ on:
     branches:
       - main
       - develop
-    paths:                          # Only run if relevant files changed
+    paths:
       - "app/**"
       - "tests/**"
       - "main.py"
@@ -24,20 +25,21 @@ on:
       - "pyproject.toml"
       - "Dockerfile"
       - ".github/workflows/**"
+      - "sonar-project.properties"
 
   pull_request:
     branches:
-      - main                        # Validate every PR before merging
+      - main
     types: [opened, synchronize, reopened]
 
-  workflow_dispatch:                # Allow manual trigger from GitHub UI
+  workflow_dispatch:
     inputs:
       push_image:
         description: "Push Docker image to Docker Hub?"
         type: boolean
         default: true
 
-# Cancel any in-progress run for the same branch/PR when a new commit arrives
+# Cancel in-progress run for same branch/PR on new commit
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -46,8 +48,6 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
   REGISTRY: docker.io
-  # IMAGE_NAME is set to <dockerhub-username>/<repo-name>
-  # The username comes from the secret; repo name from github context.
   IMAGE_REPO: ${{ secrets.DOCKER_HUB_USERNAME }}/cicd-demo
 
 # ==============================================================
@@ -58,59 +58,6 @@ jobs:
   quality-gate:
     name: "🔍 Quality Gate"
     runs-on: ubuntu-latest
-
-    steps:
-      # ── 1. Get the source code ──────────────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ── 2. Set up Python with pip cache ────────────────────
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"                  # Cache ~/.cache/pip between runs
-
-      # ── 3. Install ALL dependencies (runtime + dev tools) ──
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-
-      # ── 4. Black — code formatting check ───────────────────
-      # --check means "fail if any file would be reformatted"
-      - name: "Black — format check"
-        run: black --check --diff app/ tests/ main.py
-
-      # ── 5. isort — import order check ──────────────────────
-      - name: "isort — import order check"
-        run: isort --check-only --diff app/ tests/ main.py
-
-      # ── 6. Flake8 — style linting ──────────────────────────
-      - name: "Flake8 — lint"
-        run: flake8 app/ tests/
-
-      # ── 7. mypy — static type checking ─────────────────────
-      - name: "mypy — type check"
-        run: mypy app/
-
-      # ── 8. Bandit — Python security scan ───────────────────
-      - name: "Bandit — security scan"
-        run: bandit -r app/ -c .bandit
-
-      # ── 9. pip-audit — dependency vulnerability scan ───────
-      - name: "pip-audit — dependency CVE check"
-        run: pip-audit -r requirements.txt
-
-  # ==============================================================
-  # JOB 2 — Tests
-  # Runs pytest with 80% coverage enforcement.
-  # Depends on quality-gate passing first.
-  # ==============================================================
-  test:
-    name: "🧪 Tests & Coverage"
-    runs-on: ubuntu-latest
-    needs: quality-gate              # Only run after quality checks pass
 
     steps:
       - name: Checkout repository
@@ -127,9 +74,49 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Run tests and generate coverage report
-      # --cov-fail-under=80 is enforced via pyproject.toml [tool.coverage.report]
-      - name: "pytest — run test suite"
+      - name: "Black — format check"
+        run: black --check --diff app/ tests/ main.py
+
+      - name: "isort — import order check"
+        run: isort --check-only --diff app/ tests/ main.py
+
+      - name: "Flake8 — lint"
+        run: flake8 app/ tests/
+
+      - name: "mypy — type check"
+        run: mypy app/
+
+      - name: "Bandit — security scan"
+        run: bandit -r app/ -c .bandit
+
+      - name: "pip-audit — dependency CVE check"
+        run: pip-audit -r requirements.txt
+
+  # ==============================================================
+  # JOB 2 — Tests & Coverage
+  # Runs pytest with 80% coverage enforcement.
+  # ==============================================================
+  test:
+    name: "🧪 Tests & Coverage"
+    runs-on: ubuntu-latest
+    needs: quality-gate
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: "pytest — run test suite with coverage"
         run: |
           pytest tests/ \
             --cov=app \
@@ -137,46 +124,76 @@ jobs:
             --cov-report=xml:coverage.xml \
             -v
 
-      # Upload coverage XML as a build artifact so you can
-      # download & inspect it from the GitHub Actions UI
+      # Upload coverage.xml so the sonarcloud job can use it
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
-        if: always()                 # Upload even if tests fail
+        if: always()
         with:
           name: coverage-report
           path: coverage.xml
           retention-days: 7
 
   # ==============================================================
-  # JOB 3 — Docker Build & Push
-  # Builds a multi-stage Docker image and pushes to Docker Hub.
-  # Only pushes on:  push to main   OR   manual trigger
-  # On PRs          → build only (no push), used as a smoke test
+  # JOB 3 — SonarCloud Analysis
+  # Deep code quality + security analysis using SonarCloud.
+  #
+  # Setup (one-time):
+  #   1. Go to https://sonarcloud.io → log in with GitHub
+  #   2. Import your repository
+  #   3. Generate a token: My Account → Security → Generate Token
+  #   4. Add to GitHub repo secrets:
+  #        Name: SONAR_TOKEN
+  #        Value: the token from step 3
+  # ==============================================================
+  sonarcloud:
+    name: "📊 SonarCloud Analysis"
+    runs-on: ubuntu-latest
+    needs: test                      # Needs coverage.xml from test job
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # SonarCloud needs full git history to detect new issues vs. existing
+          fetch-depth: 0
+
+      # Download the coverage.xml produced by the test job
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+
+      # Run SonarCloud analysis — uses sonar-project.properties automatically
+      - name: "SonarCloud — code analysis"
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Auto-provided by GitHub
+          SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}    # Add this to repo secrets
+
+  # ==============================================================
+  # JOB 4 — Docker Build, Trivy Scan & Push
+  # Builds image, scans for CVEs, pushes only on main branch.
   # ==============================================================
   docker-build:
-    name: "🐳 Docker Build & Push"
+    name: "🐳 Docker Build, Trivy & Push"
     runs-on: ubuntu-latest
-    needs: [quality-gate, test]      # Both previous jobs must pass
+    needs: [quality-gate, test]      # sonarcloud runs in parallel with docker-build
 
     permissions:
       contents: read
-      packages: write                # Needed if you ever switch to GHCR
+      packages: write
+      security-events: write         # Required to upload SARIF to GitHub Security tab
 
     steps:
-      # ── 1. Checkout code ────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Set up Docker Buildx ─────────────────────────────
-      # Buildx enables: multi-platform builds, BuildKit cache,
-      # and the gha (GitHub Actions) remote cache backend.
+      # ── 2. Set up Docker Buildx ──────────────────────────────
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ── 3. Login to Docker Hub ──────────────────────────────
-      # Reads DOCKER_HUB_USERNAME and DOCKER_HUB_TOKEN from
-      # GitHub → Repo Settings → Secrets and variables → Actions
-      # This step is SKIPPED on pull_request events (no push needed).
+      # ── 3. Login to Docker Hub (skip on PRs) ─────────────────
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -185,11 +202,7 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      # ── 4. Generate image tags from git metadata ─────────────
-      # This action reads git context and produces smart tags:
-      #   main branch push  → :latest  + :main  + :sha-<short>
-      #   PR                → :pr-42
-      #   version tag v1.2  → :1.2  + :latest
+      # ── 4. Generate smart image tags ─────────────────────────
       - name: Extract Docker metadata (tags & labels)
         id: meta
         uses: docker/metadata-action@v5
@@ -203,24 +216,63 @@ jobs:
             type=sha,format=short,prefix=sha-
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      # ── 5. Build (and optionally push) the Docker image ─────
-      # cache-from/cache-to use the GHA remote cache so repeated
-      # runs only rebuild layers that actually changed.
-      - name: Build and push Docker image
-        id: build
+      # ── 5. Build Docker image (local only first for Trivy) ────
+      - name: Build Docker image (local, for Trivy scan)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          # Push only on main branch push or manual trigger; NOT on PRs
-          push: ${{ github.event_name != 'pull_request' }}
+          push: false                # Don't push yet — scan first
+          load: true                 # Load into local Docker daemon for Trivy
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache — dramatically speeds up subsequent builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ── 6. Print the image digest for full traceability ─────
+      # ── 6. Trivy — scan the built image for vulnerabilities ───
+      # Outputs a human-readable table to the console
+      - name: "Trivy — vulnerability scan (table)"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_REPO }}:latest
+          format: table
+          exit-code: "0"             # Show results but don't fail yet
+          severity: "HIGH,CRITICAL"
+
+      # Fail the pipeline if CRITICAL CVEs are found
+      - name: "Trivy — fail on CRITICAL CVEs"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_REPO }}:latest
+          format: sarif              # GitHub Security tab format
+          output: trivy-results.sarif
+          exit-code: "1"             # FAIL if CRITICAL CVE found
+          severity: "CRITICAL"
+          ignore-unfixed: true       # Ignore CVEs with no fix available
+
+      # Upload Trivy SARIF → visible in GitHub Security → Code Scanning
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()                 # Upload even if scan failed
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      # ── 7. Push image to Docker Hub (main branch only) ────────
+      - name: Push Docker image to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v5
+        id: build
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 8. Print digest for traceability ─────────────────────
       - name: Print image digest
         if: github.event_name != 'pull_request'
         run: |
