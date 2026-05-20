@@ -163,32 +163,39 @@ pipeline {
         stage('Docker Build & Push') {
             steps {
                 script {
-                    def shortSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                    def imageTag = "sha-${shortSha}"
+                    // Capture the short git SHA (not a secret — safe to use in GString)
+                    def imageTag = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                     def isMain   = (env.BRANCH_NAME == 'main')
+                    def pushFlag = isMain ? 'true' : 'false'
 
                     withCredentials([
                         string(credentialsId: 'DOCKER_HUB_USERNAME', variable: 'DOCKER_USR'),
                         string(credentialsId: 'DOCKER_HUB_TOKEN',    variable: 'DOCKER_PWD')
                     ]) {
-                        def imageRepo = "${DOCKER_USR}/cicd-demo"
+                        // ⚠️  Use \${DOCKER_USR} / \${DOCKER_PWD} so the SHELL expands
+                        // them at runtime — never Groovy. This avoids the secret
+                        // interpolation security warning.
+                        sh """
+                            IMAGE_REPO="\${DOCKER_USR}/cicd-demo"
+                            IMAGE_TAG="sha-${imageTag}"
 
-                        echo "🐳 Building Docker image: ${imageRepo}:${imageTag}"
-                        sh "docker build -t ${imageRepo}:${imageTag} ."
+                            echo "🐳 Building Docker image: \${IMAGE_REPO}:\${IMAGE_TAG}"
+                            docker build -t "\${IMAGE_REPO}:\${IMAGE_TAG}" .
 
-                        if (isMain) {
-                            echo '🚀 Pushing image to Docker Hub (main branch)...'
-                            sh "echo \${DOCKER_PWD} | docker login -u \${DOCKER_USR} --password-stdin"
-                            sh "docker push ${imageRepo}:${imageTag}"
-                            sh "docker tag  ${imageRepo}:${imageTag} ${imageRepo}:latest"
-                            sh "docker push ${imageRepo}:latest"
-                            echo "✅ Pushed: ${imageRepo}:${imageTag} and ${imageRepo}:latest"
-                        } else {
-                            echo "ℹ️  Not on main branch — image built but NOT pushed."
-                        }
+                            if [ "${pushFlag}" = "true" ]; then
+                                echo "🚀 Pushing image to Docker Hub (main branch)..."
+                                echo "\${DOCKER_PWD}" | docker login -u "\${DOCKER_USR}" --password-stdin
+                                docker push "\${IMAGE_REPO}:\${IMAGE_TAG}"
+                                docker tag  "\${IMAGE_REPO}:\${IMAGE_TAG}" "\${IMAGE_REPO}:latest"
+                                docker push "\${IMAGE_REPO}:latest"
+                                echo "✅ Pushed: \${IMAGE_REPO}:\${IMAGE_TAG} and \${IMAGE_REPO}:latest"
+                            else
+                                echo "ℹ️  Not on main branch — image built locally, NOT pushed."
+                            fi
 
-                        // Remove local image to save disk space
-                        sh "docker rmi ${imageRepo}:${imageTag} || true"
+                            # Clean up local image to save disk space
+                            docker rmi "\${IMAGE_REPO}:\${IMAGE_TAG}" || true
+                        """
                     }
                 }
             }
