@@ -6,14 +6,18 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 import app.database as db
 from app.models import (
+    CategoryCreate,
+    CategoryResponse,
     EchoRequest,
     EchoResponse,
     ItemCreate,
     ItemResponse,
     ItemUpdate,
     MessageResponse,
+    StatsResponse,
     UserCreate,
     UserResponse,
+    UserUpdate,
 )
 
 router = APIRouter()
@@ -50,6 +54,8 @@ def root() -> Dict[str, object]:
         "resources": {
             "items": "/items",
             "users": "/users",
+            "categories": "/categories",
+            "stats": "/stats",
         },
     }
 
@@ -72,8 +78,95 @@ def echo(payload: EchoRequest) -> EchoResponse:
 
 
 # ===========================================================================
-# Items  (full CRUD)
+# Stats
 # ===========================================================================
+
+
+@router.get(
+    "/stats",
+    response_model=StatsResponse,
+    tags=["Stats"],
+    summary="Application statistics",
+    description="Returns aggregate counts for items, users, and categories.",
+)
+def get_stats() -> StatsResponse:
+    """Return aggregate statistics for the entire data store."""
+    return db.get_stats()
+
+
+# ===========================================================================
+# Categories  (full CRUD)
+# ===========================================================================
+
+
+@router.get(
+    "/categories",
+    response_model=List[CategoryResponse],
+    tags=["Categories"],
+    summary="List all categories",
+)
+def list_categories() -> List[CategoryResponse]:
+    """Return all categories."""
+    return db.get_all_categories()
+
+
+@router.get(
+    "/categories/{category_id}",
+    response_model=CategoryResponse,
+    tags=["Categories"],
+    summary="Get a single category",
+)
+def get_category(category_id: int) -> CategoryResponse:
+    """Retrieve one category by its numeric ID."""
+    category = db.get_category_by_id(category_id)
+    if category is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+    return category
+
+
+@router.post(
+    "/categories",
+    response_model=CategoryResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Categories"],
+    summary="Create a category",
+)
+def create_category(payload: CategoryCreate) -> CategoryResponse:
+    """Create a new category and return the persisted record."""
+    return db.create_category(payload)
+
+
+@router.delete(
+    "/categories/{category_id}",
+    response_model=MessageResponse,
+    tags=["Categories"],
+    summary="Delete a category",
+)
+def delete_category(category_id: int) -> MessageResponse:
+    """Remove a category permanently."""
+    deleted = db.delete_category(category_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+    return MessageResponse(message=f"Category {category_id} deleted successfully")
+
+
+# ===========================================================================
+# Items  (full CRUD + search)
+# ===========================================================================
+
+
+@router.get(
+    "/items/search",
+    response_model=List[ItemResponse],
+    tags=["Items"],
+    summary="Search items",
+    description="Full-text search on item name and description (case-insensitive).",
+)
+def search_items(
+    q: str = Query(..., min_length=1, description="Search query string"),
+) -> List[ItemResponse]:
+    """Search items by name or description."""
+    return db.search_items(q)
 
 
 @router.get(
@@ -84,11 +177,14 @@ def echo(payload: EchoRequest) -> EchoResponse:
 )
 def list_items(
     in_stock: Optional[bool] = Query(default=None, description="Filter by stock status"),
+    category_id: Optional[int] = Query(default=None, description="Filter by category ID"),
 ) -> List[ItemResponse]:
-    """Return all items, with an optional filter on stock availability."""
+    """Return all items, with optional filters on stock availability and category."""
     items = db.get_all_items()
     if in_stock is not None:
         items = [i for i in items if i.in_stock == in_stock]
+    if category_id is not None:
+        items = [i for i in items if i.category_id == category_id]
     return items
 
 
@@ -147,7 +243,7 @@ def delete_item(item_id: int) -> MessageResponse:
 
 
 # ===========================================================================
-# Users  (CRUD without update for brevity)
+# Users  (full CRUD including PATCH update)
 # ===========================================================================
 
 
@@ -186,6 +282,21 @@ def get_user(user_id: int) -> UserResponse:
 def create_user(payload: UserCreate) -> UserResponse:
     """Register a new user."""
     return db.create_user(payload)
+
+
+@router.patch(
+    "/users/{user_id}",
+    response_model=UserResponse,
+    tags=["Users"],
+    summary="Update a user",
+    description="Partially update a user's email, full_name, or active status.",
+)
+def update_user(user_id: int, payload: UserUpdate) -> UserResponse:
+    """Partially update an existing user's fields."""
+    updated = db.update_user(user_id, payload)
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return updated
 
 
 @router.delete(

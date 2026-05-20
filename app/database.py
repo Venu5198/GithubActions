@@ -2,7 +2,17 @@
 
 from typing import Dict, List, Optional
 
-from app.models import ItemCreate, ItemResponse, ItemUpdate, UserCreate, UserResponse
+from app.models import (
+    CategoryCreate,
+    CategoryResponse,
+    ItemCreate,
+    ItemResponse,
+    ItemUpdate,
+    StatsResponse,
+    UserCreate,
+    UserResponse,
+    UserUpdate,
+)
 
 # ---------------------------------------------------------------------------
 # In-memory "databases"  — typed explicitly so mypy is happy
@@ -10,8 +20,57 @@ from app.models import ItemCreate, ItemResponse, ItemUpdate, UserCreate, UserRes
 
 _items: Dict[int, Dict[str, object]] = {}
 _users: Dict[int, Dict[str, object]] = {}
+_categories: Dict[int, Dict[str, object]] = {}
 _item_counter: int = 0
 _user_counter: int = 0
+_category_counter: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Category operations
+# ---------------------------------------------------------------------------
+
+
+def get_all_categories() -> List[CategoryResponse]:
+    """Return all categories."""
+    return [CategoryResponse(**c) for c in _categories.values()]  # type: ignore[arg-type]
+
+
+def get_category_by_id(category_id: int) -> Optional[CategoryResponse]:
+    """Return a single category by its ID, or None if not found."""
+    data = _categories.get(category_id)
+    if data is None:
+        return None
+    return CategoryResponse(**data)  # type: ignore[arg-type]
+
+
+def create_category(payload: CategoryCreate) -> CategoryResponse:
+    """Persist a new category and return it."""
+    global _category_counter
+    _category_counter += 1
+    category_id = _category_counter
+    record: Dict[str, object] = {
+        "id": category_id,
+        "name": payload.name,
+        "description": payload.description,
+    }
+    _categories[category_id] = record
+    return CategoryResponse(**record)  # type: ignore[arg-type]
+
+
+def delete_category(category_id: int) -> bool:
+    """Remove a category. Returns True if deleted, False if not found."""
+    if category_id not in _categories:
+        return False
+    del _categories[category_id]
+    return True
+
+
+def reset_categories() -> None:
+    """Clear the category store (used in tests)."""
+    global _category_counter
+    _categories.clear()
+    _category_counter = 0
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +102,7 @@ def create_item(payload: ItemCreate) -> ItemResponse:
         "description": payload.description,
         "price": payload.price,
         "in_stock": payload.in_stock,
+        "category_id": payload.category_id,
     }
     _items[item_id] = record
     return ItemResponse(**record)  # type: ignore[arg-type]
@@ -65,6 +125,18 @@ def delete_item(item_id: int) -> bool:
         return False
     del _items[item_id]
     return True
+
+
+def search_items(q: str) -> List[ItemResponse]:
+    """Return items whose name or description contains the query string (case-insensitive)."""
+    query = q.lower()
+    results = []
+    for item in _items.values():
+        name = str(item.get("name", "")).lower()
+        description = str(item.get("description", "")).lower()
+        if query in name or query in description:
+            results.append(ItemResponse(**item))  # type: ignore[arg-type]
+    return results
 
 
 def reset_items() -> None:
@@ -108,6 +180,17 @@ def create_user(payload: UserCreate) -> UserResponse:
     return UserResponse(**record)  # type: ignore[arg-type]
 
 
+def update_user(user_id: int, payload: UserUpdate) -> Optional[UserResponse]:
+    """Partially update a user and return it, or None if not found."""
+    if user_id not in _users:
+        return None
+    record = _users[user_id]
+    updates = payload.model_dump(exclude_none=True)
+    record.update(updates)
+    _users[user_id] = record
+    return UserResponse(**record)  # type: ignore[arg-type]
+
+
 def delete_user(user_id: int) -> bool:
     """Remove a user. Returns True if deleted, False if not found."""
     if user_id not in _users:
@@ -121,3 +204,22 @@ def reset_users() -> None:
     global _user_counter
     _users.clear()
     _user_counter = 0
+
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+
+def get_stats() -> StatsResponse:
+    """Return aggregate statistics across all data stores."""
+    all_items = list(_items.values())
+    all_users = list(_users.values())
+    return StatsResponse(
+        total_items=len(all_items),
+        items_in_stock=sum(1 for i in all_items if i.get("in_stock")),
+        items_out_of_stock=sum(1 for i in all_items if not i.get("in_stock")),
+        total_users=len(all_users),
+        active_users=sum(1 for u in all_users if u.get("is_active")),
+        total_categories=len(_categories),
+    )

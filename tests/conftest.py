@@ -14,9 +14,11 @@ def reset_stores() -> None:
     """Reset in-memory stores before every test to guarantee isolation."""
     db.reset_items()
     db.reset_users()
+    db.reset_categories()
     yield
     db.reset_items()
     db.reset_users()
+    db.reset_categories()
 
 
 @pytest.fixture()
