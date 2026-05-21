@@ -254,17 +254,17 @@ pipeline {
 
                             # Install Trivy to /tmp/trivy-bin — no root required
                             TRIVY_BIN="/tmp/trivy-bin"
-                            if [ ! -f "${TRIVY_BIN}/trivy" ]; then
+                            if [ ! -f "\${TRIVY_BIN}/trivy" ]; then
                                 echo "⬇️  Downloading Trivy..."
-                                mkdir -p "${TRIVY_BIN}"
+                                mkdir -p "\${TRIVY_BIN}"
                                 curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-                                    | sh -s -- -b "${TRIVY_BIN}"
+                                    | sh -s -- -b "\${TRIVY_BIN}"
                             else
                                 echo "✅ Trivy already downloaded, reusing..."
                             fi
 
                             # Always set PATH — sh blocks do not inherit PATH from each other
-                            export PATH="${TRIVY_BIN}:\${PATH}"
+                            export PATH="\${TRIVY_BIN}:\${PATH}"
 
                             # Scan: show HIGH+CRITICAL (informational, never fails)
                             trivy image \
@@ -284,6 +284,7 @@ pipeline {
                                 "\${IMAGE_REPO}:\${IMAGE_TAG}"
 
                             echo "✅ Trivy scan complete — no CRITICAL CVEs found"
+
 
 
                             # ── 3. Push to Docker Hub (main branch only) ──────
