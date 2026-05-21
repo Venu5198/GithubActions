@@ -165,10 +165,11 @@ jobs:
 
       # Run SonarCloud analysis — uses sonar-project.properties automatically
       - name: "SonarCloud — code analysis"
-        uses: SonarSource/sonarcloud-github-action@master
+        uses: SonarSource/sonarqube-scan-action@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Auto-provided by GitHub
           SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}    # Add this to repo secrets
+          SONAR_HOST_URL: https://sonarcloud.io       # Required for SonarCloud
 
   # ==============================================================
   # JOB 4 — Docker Build, Trivy Scan & Push
