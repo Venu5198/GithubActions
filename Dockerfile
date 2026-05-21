@@ -6,7 +6,7 @@
 # This layer is DISCARDED in the final image; only the installed
 # packages (in /install) are copied across.
 # =============================================================
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim-bookworm AS builder
 
 WORKDIR /install
 
@@ -23,7 +23,7 @@ RUN pip install --upgrade pip \
 # Lean final image: only app code + runtime packages.
 # No build tools, no dev tools, no cache, no .venv.
 # =============================================================
-FROM python:3.11-slim AS runtime
+FROM python:3.11-slim-bookworm AS runtime
 
 # Keeps Python from writing .pyc files and enables unbuffered
 # stdout/stderr so logs appear immediately in the container.
