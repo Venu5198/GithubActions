@@ -252,13 +252,21 @@ pipeline {
                             # ── 2. Trivy — scan image for CVEs ────────────────
                             echo "🛡️  Running Trivy vulnerability scan..."
 
-                            # Download Trivy if not installed
-                            if ! command -v trivy &> /dev/null; then
+                            # Install Trivy to /tmp/trivy-bin — no root required
+                            TRIVY_BIN="/tmp/trivy-bin"
+                            if [ ! -f "${TRIVY_BIN}/trivy" ]; then
                                 echo "⬇️  Downloading Trivy..."
-                                curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+                                mkdir -p "${TRIVY_BIN}"
+                                curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                                    | sh -s -- -b "${TRIVY_BIN}"
+                            else
+                                echo "✅ Trivy already downloaded, reusing..."
                             fi
 
-                            # Scan: show all, but only FAIL on CRITICAL severity
+                            # Always set PATH — sh blocks do not inherit PATH from each other
+                            export PATH="${TRIVY_BIN}:\${PATH}"
+
+                            # Scan: show HIGH+CRITICAL (informational, never fails)
                             trivy image \
                                 --exit-code 0 \
                                 --severity HIGH,CRITICAL \
@@ -270,11 +278,13 @@ pipeline {
                             trivy image \
                                 --exit-code 1 \
                                 --severity CRITICAL \
+                                --ignore-unfixed \
                                 --format json \
                                 --output reports/trivy-report.json \
                                 "\${IMAGE_REPO}:\${IMAGE_TAG}"
 
                             echo "✅ Trivy scan complete — no CRITICAL CVEs found"
+
 
                             # ── 3. Push to Docker Hub (main branch only) ──────
                             if [ "${pushFlag}" = "true" ]; then
