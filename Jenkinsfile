@@ -164,14 +164,23 @@ pipeline {
                 echo '📊 Running SonarQube analysis...'
                 withCredentials([string(credentialsId: 'SONAR_TOKEN', variable: 'SONAR_AUTH_TOKEN')]) {
                     sh '''
-                        # Download sonar-scanner if not already installed
-                        if ! command -v sonar-scanner &> /dev/null; then
+                        SCANNER_DIR="/tmp/sonar-scanner-6.2.1.4610-linux-x64"
+                        SCANNER_ZIP="/tmp/sonar-scanner.zip"
+
+                        # Check directory (not binary) — PATH is not persistent between sh blocks
+                        if [ ! -d "${SCANNER_DIR}" ]; then
                             echo "⬇️  Downloading sonar-scanner..."
-                            curl -sSLo /tmp/sonar-scanner.zip \
+                            curl -sSLo "${SCANNER_ZIP}" \
                                 https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.2.1.4610-linux-x64.zip
-                            unzip -q /tmp/sonar-scanner.zip -d /tmp/
-                            export PATH="/tmp/sonar-scanner-6.2.1.4610-linux-x64/bin:$PATH"
+                            # -o flag overwrites existing files without prompting
+                            unzip -o -q "${SCANNER_ZIP}" -d /tmp/
+                            rm -f "${SCANNER_ZIP}"
+                        else
+                            echo "✅ sonar-scanner already downloaded, reusing..."
                         fi
+
+                        # Always set PATH — previous sh block PATH is not inherited
+                        export PATH="${SCANNER_DIR}/bin:${PATH}"
 
                         echo "🔍 Running sonar-scanner..."
                         sonar-scanner \
@@ -187,6 +196,7 @@ pipeline {
                 }
             }
         }
+
 
         // ── Stage 6: SonarQube Quality Gate Check ───────────────
         // Waits for SonarQube to compute the Quality Gate result.
